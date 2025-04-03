@@ -1,3 +1,4 @@
+/* Base Styles */
 body, html {
     margin: 0;
     padding: 0;
@@ -10,22 +11,76 @@ body {
     display: flex;
     flex-direction: column;
     height: 100vh;
-    overflow: hidden; /* Prevent overall page scrolling */
+    overflow: hidden;
 }
 
+/* Header Styles */
 header {
     background-color: #000000;
     color: white;
     padding: 10px 20px;
     text-align: center;
     z-index: 10;
+    position: relative;
 }
 
+/* Hamburger Menu Styles */
+.hamburger-menu {
+    position: absolute;
+    left: 20px;
+    top: 50%;
+    transform: translateY(-50%);
+    cursor: pointer;
+    z-index: 100;
+}
+
+.hamburger-menu i {
+    font-size: 1.8rem;
+    color: white;
+}
+
+.dropdown-menu {
+    position: absolute;
+    top: 100%;
+    left: 0;
+    background-color: #333;
+    border-radius: 5px;
+    padding: 10px;
+    display: none;
+    flex-direction: column;
+    min-width: 120px;
+    box-shadow: 0 5px 15px rgba(0, 0, 0, 0.3);
+}
+
+.dropdown-menu a {
+    color: white;
+    text-decoration: none;
+    padding: 10px;
+    display: flex;
+    align-items: center;
+    transition: background-color 0.2s;
+}
+
+.dropdown-menu a:hover {
+    background-color: #444;
+}
+
+.dropdown-menu i {
+    margin-right: 10px;
+    font-size: 1.2rem;
+}
+
+.hamburger-menu.active .dropdown-menu {
+    display: flex;
+}
+
+/* Navigation Styles */
 nav {
     background-color: #191d1c;
     padding: 10px;
     text-align: center;
     z-index: 10;
+    display: none;
 }
 
 nav a {
@@ -35,15 +90,17 @@ nav a {
     font-weight: bold;
 }
 
+/* Main Container Styles */
 .container {
     flex: 1;
     display: flex;
     flex-direction: column;
     padding: 20px;
     background-color: #f0f2f5;
-    overflow: hidden; /* Prevent container scrolling */
+    overflow: hidden;
 }
 
+/* Chat Container Styles */
 .chat-container {
     flex: 1;
     display: flex;
@@ -77,10 +134,11 @@ nav a {
     background-color: #e9e2e2;
     display: flex;
     flex-direction: column;
-    scroll-behavior: smooth; /* Smooth scrolling */
-    max-height: calc(100vh - 250px); /* Fixed height for scrolling */
+    scroll-behavior: smooth;
+    max-height: calc(100vh - 250px);
 }
 
+/* Message Styles */
 .message {
     padding: 10px;
     border-radius: 10px;
@@ -92,6 +150,7 @@ nav a {
     background-color: #33ad0a;
     color: #ffffff;
     align-self: flex-start;
+    position: relative;
 }
 
 .message.sent {
@@ -101,6 +160,20 @@ nav a {
     border: 1px solid #ddd;
 }
 
+.message img {
+    max-width: 100%;
+    max-height: 300px;
+    border-radius: 10px;
+    margin-top: 5px;
+    display: block;
+}
+
+.message.error {
+    background-color: #ffebee;
+    color: #c62828;
+}
+
+/* Chat Input Styles */
 .chat-input {
     display: flex;
     padding: 10px;
@@ -117,7 +190,7 @@ nav a {
     padding: 10px;
     border: 1px solid #ddd;
     border-radius: 20px;
-    margin-right: 10px;
+    margin: 0 10px;
     outline: none;
     resize: none;
     overflow-y: hidden;
@@ -126,40 +199,101 @@ nav a {
 }
 
 .chat-input button {
-    padding: 10px 15px;
+    padding: 10px;
     border: none;
-    background-color: #000000;
     color: white;
-    border-radius: 20px;
+    border-radius: 50%;
     cursor: pointer;
-    margin-left: 10px;
+    width: 40px;
+    height: 40px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.3s ease;
 }
 
-.chat-input button:hover {
+#upload-btn, #voice-btn {
     background-color: #000000;
 }
 
-/* Scroll-to-bottom button */
+#upload-btn:hover, #voice-btn:hover {
+    background-color: #333;
+}
+
+/* Send/Stop Button Styles */
+#send-stop-btn {
+    background-color: #2196F3;
+}
+
+#send-stop-btn:hover {
+    background-color: #0b7dda;
+}
+
+#send-stop-btn.stop-mode {
+    background-color: #f44336;
+}
+
+#send-stop-btn.stop-mode:hover {
+    background-color: #d32f2f;
+}
+
+#send-stop-btn i {
+    transition: transform 0.3s;
+}
+
+/* Image Preview Styles */
+.image-preview-container {
+    position: relative;
+    display: inline-block;
+    margin-top: 5px;
+}
+
+.image-preview {
+    max-width: 100%;
+    max-height: 100px;
+    border-radius: 10px;
+    border: 2px solid #ddd;
+}
+
+.remove-image {
+    position: absolute;
+    top: -10px;
+    right: -10px;
+    background-color: #e53935;
+    color: white;
+    border-radius: 50%;
+    width: 24px;
+    height: 24px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    font-size: 12px;
+    box-shadow: 0 2px 5px rgba(0, 0, 0, 0.2);
+}
+
+/* Scroll Button Styles */
 #scroll-to-bottom {
     position: absolute;
-    bottom: 130px; /* Position above the chat input */
+    bottom: 130px;
     right: 20px;
     background-color: #3f4343;
     color: white;
     border: none;
-    border-radius: 50%; /* Circular button */
+    border-radius: 50%;
     width: 40px;
     height: 40px;
     cursor: pointer;
-    display: none; /* Hidden by default */
+    display: none;
     box-shadow: 0 2px 10px rgba(0, 0, 0, 0.2);
-    z-index: 10; /* Ensure it's above other elements */
+    z-index: 10;
 }
 
 #scroll-to-bottom:hover {
     background-color: #128c7e;
 }
 
+/* Footer Styles */
 footer {
     background-color: #000000;
     color: white;
@@ -167,4 +301,70 @@ footer {
     padding: 10px;
     font-size: 14px;
     z-index: 10;
+}
+
+/* Copy Button Styles */
+.copy-btn {
+    background-color: transparent;
+    border: none;
+    cursor: pointer;
+    margin-top: 5px;
+    display: inline-block;
+    color: #ffffff;
+    padding: 2px;
+    opacity: 0.7;
+    transition: opacity 0.2s;
+}
+
+.copy-btn:hover {
+    opacity: 1;
+}
+
+.copy-btn.copied {
+    color: #4CAF50;
+}
+
+.copy-btn i {
+    font-size: 14px;
+}
+
+.message.received .copy-btn-container {
+    text-align: right;
+    margin-top: 5px;
+    position: relative;
+}
+
+/* Copy Feedback Animation */
+@keyframes fadeIn {
+    from { opacity: 0; }
+    to { opacity: 1; }
+}
+
+.copy-feedback {
+    position: absolute;
+    right: 25px;
+    background-color: #4CAF50;
+    color: white;
+    padding: 2px 6px;
+    border-radius: 3px;
+    font-size: 12px;
+    display: none;
+    animation: fadeIn 0.3s;
+}
+
+/* Responsive Styles */
+@media (max-width: 600px) {
+    .dropdown-menu {
+        left: -10px;
+    }
+    
+    .chat-input button {
+        width: 36px;
+        height: 36px;
+        padding: 8px;
+    }
+    
+    .message {
+        max-width: 85%;
+    }
 }

@@ -1,12 +1,88 @@
 let mediaRecorder;
 let audioChunks = [];
+let uploadedImage = null;
+let isStreaming = false;
+let eventSource = null;
 
-// Function to show/hide the scroll-to-bottom button
+// Helper function to escape HTML
+function escapeHtml(unsafe) {
+    return unsafe
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#039;");
+}
+
+// Toggle between send and stop modes
+function toggleSendStop() {
+    const sendStopBtn = document.getElementById('send-stop-btn');
+    
+    if (!isStreaming) {
+        // Send message mode
+        sendMessage();
+        isStreaming = true;
+        sendStopBtn.classList.add('stop-mode');
+        sendStopBtn.innerHTML = '<i class="fas fa-stop"></i>';
+    } else {
+        // Stop chat mode
+        if (eventSource) {
+            eventSource.close();
+        }
+        isStreaming = false;
+        sendStopBtn.classList.remove('stop-mode');
+        sendStopBtn.innerHTML = '<i class="fas fa-arrow-up"></i>';
+        
+        // Remove loading message if exists
+        const loadingMessages = document.querySelectorAll('.message.received');
+        loadingMessages.forEach(msg => {
+            if (msg.textContent.includes('Thinking...')) {
+                msg.remove();
+            }
+        });
+    }
+}
+
+// Add copy button functionality
+function addCopyButtonFunctionality() {
+    document.querySelectorAll('.copy-btn').forEach(button => {
+        button.addEventListener('click', function() {
+            const textToCopy = this.getAttribute('data-text');
+            const feedback = this.parentElement.querySelector('.copy-feedback');
+            
+            navigator.clipboard.writeText(textToCopy).then(() => {
+                // Show feedback
+                feedback.style.display = 'inline-block';
+                setTimeout(() => {
+                    feedback.style.display = 'none';
+                }, 2000);
+            }).catch(err => {
+                console.error('Failed to copy text: ', err);
+            });
+        });
+    });
+}
+
+// Hamburger menu functionality
+document.addEventListener('DOMContentLoaded', function() {
+    const hamburgerMenu = document.querySelector('.hamburger-menu');
+    
+    hamburgerMenu.addEventListener('click', function() {
+        this.classList.toggle('active');
+    });
+    
+    document.addEventListener('click', function(event) {
+        if (!hamburgerMenu.contains(event.target)) {
+            hamburgerMenu.classList.remove('active');
+        }
+    });
+});
+
+// Scroll functionality
 function toggleScrollButton() {
     const chatMessages = document.getElementById("chat-messages");
     const scrollButton = document.getElementById("scroll-to-bottom");
 
-    // Show the button if the user is not at the bottom
     if (chatMessages.scrollTop + chatMessages.clientHeight < chatMessages.scrollHeight - 50) {
         scrollButton.style.display = "block";
     } else {
@@ -14,114 +90,258 @@ function toggleScrollButton() {
     }
 }
 
-// Function to scroll to the bottom of the chat
 function scrollToBottom() {
     const chatMessages = document.getElementById("chat-messages");
     chatMessages.scrollTop = chatMessages.scrollHeight;
-    toggleScrollButton(); // Hide the button after scrolling
+    toggleScrollButton();
 }
 
-// Add event listener for scrolling to toggle the button
 document.getElementById("chat-messages").addEventListener("scroll", toggleScrollButton);
 
+// Voice recognition
 function startVoiceRecognition() {
-    navigator.mediaDevices.getUserMedia({ audio: true })
-        .then((stream) => {
-            mediaRecorder = new MediaRecorder(stream);
-            mediaRecorder.start();
+    if (!('webkitSpeechRecognition' in window)) {
+        alert("Your browser doesn't support voice recognition. Please use Chrome or Edge.");
+        return;
+    }
 
-            mediaRecorder.ondataavailable = (event) => {
-                audioChunks.push(event.data);
-            };
+    const recognition = new webkitSpeechRecognition();
+    recognition.continuous = false;
+    recognition.interimResults = false;
 
-            mediaRecorder.onstop = () => {
-                const audioBlob = new Blob(audioChunks, { type: "audio/wav" });
-                sendAudioToServer(audioBlob);
-                audioChunks = [];
-            };
+    recognition.onstart = function() {
+        document.getElementById("voice-btn").style.backgroundColor = "#ff0000";
+    };
 
-            // Stop recording after 5 seconds (or adjust as needed)
-            setTimeout(() => {
-                mediaRecorder.stop();
-            }, 5000);
-        })
-        .catch((error) => {
-            console.error("Error accessing microphone:", error);
-        });
+    recognition.onresult = function(event) {
+        const transcript = event.results[0][0].transcript;
+        document.getElementById("user-input").value = transcript;
+        document.getElementById("voice-btn").style.backgroundColor = "#000000";
+    };
+
+    recognition.onerror = function(event) {
+        console.error("Voice recognition error", event.error);
+        document.getElementById("voice-btn").style.backgroundColor = "#000000";
+    };
+
+    recognition.onend = function() {
+        document.getElementById("voice-btn").style.backgroundColor = "#000000";
+    };
+
+    recognition.start();
 }
 
-function sendAudioToServer(audioBlob) {
-    const formData = new FormData();
-    formData.append("audio", audioBlob, "recording.wav");
+// Image upload handling
+document.getElementById('image-upload').addEventListener('change', function(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+    
+    if (file.size > 10 * 1024 * 1024) {
+        showError("Image size should be less than 10MB");
+        return;
+    }
+    
+    uploadedImage = file;
+    
+    const previewContainer = document.createElement("div");
+    previewContainer.id = "image-preview-container";
+    previewContainer.className = "image-preview-container";
+    
+    const imgPreview = document.createElement("img");
+    imgPreview.className = "image-preview";
+    imgPreview.src = URL.createObjectURL(file);
+    
+    const removeBtn = document.createElement("div");
+    removeBtn.className = "remove-image";
+    removeBtn.innerHTML = "✕";
+    removeBtn.onclick = function() {
+        removeImagePreview();
+    };
+    
+    previewContainer.appendChild(imgPreview);
+    previewContainer.appendChild(removeBtn);
+    
+    const chatInput = document.getElementById("chat-input");
+    removeImagePreview();
+    chatInput.appendChild(previewContainer);
+    e.target.value = "";
+});
 
-    fetch("/upload-audio", {
-        method: "POST",
-        body: formData,
-    })
-    .then((response) => response.json())
-    .then((data) => {
-        if (data.transcript) {
-            document.getElementById("user-input").value = data.transcript;
-            sendMessage();  // Automatically send the transcribed text to the chatbot
-        } else {
-            console.error("Error transcribing audio:", data.error);
-        }
-    })
-    .catch((error) => {
-        console.error("Error uploading audio:", error);
-    });
+function removeImagePreview() {
+    const existingPreview = document.getElementById("image-preview-container");
+    if (existingPreview) {
+        existingPreview.remove();
+    }
+    uploadedImage = null;
 }
 
+function showError(message) {
+    const chatMessages = document.getElementById("chat-messages");
+    const errorMessage = document.createElement("div");
+    errorMessage.className = "message received error";
+    errorMessage.innerHTML = `<p>${message}</p>`;
+    chatMessages.appendChild(errorMessage);
+    scrollToBottom();
+}
+
+// Text message handling
 function sendMessage() {
     const userInput = document.getElementById("user-input");
     const message = userInput.value.trim();
-    if (message === "") return;
-
     const chatMessages = document.getElementById("chat-messages");
+    
+    if (message === "" && !uploadedImage) return;
 
-    // Add user message
+    const textToSend = message;
+    userInput.value = "";
+    userInput.style.height = "auto";
+
     const userMessage = document.createElement("div");
     userMessage.className = "message sent";
-    userMessage.innerHTML = `<p>${message}</p>`;
+    
+    if (textToSend) {
+        userMessage.innerHTML = `<p>${textToSend}</p>`;
+    }
+    
+    if (uploadedImage) {
+        const imgElement = document.createElement("img");
+        imgElement.src = URL.createObjectURL(uploadedImage);
+        userMessage.appendChild(imgElement);
+    }
+    
     chatMessages.appendChild(userMessage);
-
-    // Show the scroll-to-bottom button
-    toggleScrollButton();
-
-    userInput.value = "";
-
-    // Create a new message element for the AI's response
-    const botMessage = document.createElement("div");
-    botMessage.className = "message received";
-    botMessage.innerHTML = `<p>AI: </p>`;
-    chatMessages.appendChild(botMessage);
-
-    // Scroll to bottom
     scrollToBottom();
 
-    // Create an EventSource to listen for the response
-    const eventSource = new EventSource(`/chat?message=${encodeURIComponent(message)}`);
+    const formData = new FormData();
+    formData.append("prompt", textToSend || "");
+    
+    if (uploadedImage) {
+        formData.append("file", uploadedImage);
+    }
 
-    eventSource.onmessage = (event) => {
-        if (event.data === "[END]") {
-            // Close the EventSource when the response ends
+    const loadingMessage = document.createElement("div");
+    loadingMessage.className = "message received";
+    loadingMessage.innerHTML = "<p>Thinking...</p>";
+    chatMessages.appendChild(loadingMessage);
+    scrollToBottom();
+
+    const endpoint = uploadedImage ? "/analyze-image" : "/chat";
+
+    if (uploadedImage) {
+        fetch(endpoint, {
+            method: "POST",
+            body: formData
+        })
+        .then(response => {
+            if (!response.ok) {
+                throw new Error(`HTTP error! status: ${response.status}`);
+            }
+            return response.json();
+        })
+        .then(data => {
+            chatMessages.removeChild(loadingMessage);
+            
+            if (data.error) {
+                throw new Error(data.error);
+            }
+            
+            const botMessage = document.createElement("div");
+            botMessage.className = "message received";
+            botMessage.innerHTML = `
+                <p>${data.analysis}</p>
+                <div class="copy-btn-container">
+                    <button class="copy-btn" data-text="${escapeHtml(data.analysis)}">
+                        <i class="far fa-copy"></i>
+                    </button>
+                    <span class="copy-feedback">Copied!</span>
+                </div>
+            `;
+            chatMessages.appendChild(botMessage);
+            scrollToBottom();
+            addCopyButtonFunctionality();
+            
+            // Reset send/stop button
+            isStreaming = false;
+            document.getElementById('send-stop-btn').classList.remove('stop-mode');
+            document.getElementById('send-stop-btn').innerHTML = '<i class="fas fa-arrow-up"></i>';
+        })
+        .catch(error => {
+            console.error("Error:", error);
+            chatMessages.removeChild(loadingMessage);
+            
+            const errorMessage = document.createElement("div");
+            errorMessage.className = "message received error";
+            errorMessage.innerHTML = `<p>Error: ${error.message}</p>`;
+            chatMessages.appendChild(errorMessage);
+            scrollToBottom();
+            
+            // Reset send/stop button
+            isStreaming = false;
+            document.getElementById('send-stop-btn').classList.remove('stop-mode');
+            document.getElementById('send-stop-btn').innerHTML = '<i class="fas fa-arrow-up"></i>';
+        })
+        .finally(() => {
+            removeImagePreview();
+        });
+    } else {
+        eventSource = new EventSource(`/chat?message=${encodeURIComponent(textToSend)}`);
+
+        const botMessage = document.createElement("div");
+        botMessage.className = "message received";
+        botMessage.innerHTML = `
+            <p>AI: </p>
+            <div class="copy-btn-container">
+                <button class="copy-btn" style="display:none" data-text="">
+                    <i class="far fa-copy"></i>
+                </button>
+                <span class="copy-feedback">Copied!</span>
+            </div>
+        `;
+        chatMessages.appendChild(botMessage);
+        scrollToBottom();
+
+        eventSource.onmessage = (event) => {
+            if (event.data === "[END]") {
+                eventSource.close();
+                chatMessages.removeChild(loadingMessage);
+                
+                const fullText = botMessage.querySelector("p").textContent;
+                const copyBtn = botMessage.querySelector(".copy-btn");
+                copyBtn.style.display = "inline-block";
+                copyBtn.setAttribute("data-text", escapeHtml(fullText));
+                addCopyButtonFunctionality();
+                
+                // Reset send/stop button
+                isStreaming = false;
+                document.getElementById('send-stop-btn').classList.remove('stop-mode');
+                document.getElementById('send-stop-btn').innerHTML = '<i class="fas fa-arrow-up"></i>';
+            } else {
+                const textSpan = botMessage.querySelector("p");
+                textSpan.textContent += event.data;
+                toggleScrollButton();
+            }
+        };
+
+        eventSource.onerror = (error) => {
+            console.error("EventSource failed:", error);
             eventSource.close();
-        } else {
-            // Append the chunk to the AI's response
-            const textSpan = botMessage.querySelector("p");
-            textSpan.textContent += event.data;
-
-            // Show the scroll-to-bottom button
-            toggleScrollButton();
-        }
-    };
-
-    eventSource.onerror = (error) => {
-        console.error("EventSource failed:", error);
-        eventSource.close();
-    };
+            chatMessages.removeChild(loadingMessage);
+            
+            const errorMessage = document.createElement("div");
+            errorMessage.className = "message received error";
+            errorMessage.innerHTML = `<p>Error: Connection failed</p>`;
+            chatMessages.appendChild(errorMessage);
+            scrollToBottom();
+            
+            // Reset send/stop button
+            isStreaming = false;
+            document.getElementById('send-stop-btn').classList.remove('stop-mode');
+            document.getElementById('send-stop-btn').innerHTML = '<i class="fas fa-arrow-up"></i>';
+        };
+    }
 }
 
+// Textarea auto-resize
 document.getElementById("user-input").addEventListener("input", function () {
     this.style.height = "auto";
     this.style.height = (this.scrollHeight) + "px";
@@ -130,7 +350,7 @@ document.getElementById("user-input").addEventListener("input", function () {
 document.getElementById("user-input").addEventListener("keypress", function (event) {
     if (event.key === "Enter" && !event.shiftKey) {
         event.preventDefault();
-        sendMessage();
+        toggleSendStop();
     }
 });
 
