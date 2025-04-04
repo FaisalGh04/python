@@ -6,11 +6,8 @@ import secrets
 from dotenv import load_dotenv
 from langdetect import detect, DetectorFactory, LangDetectException
 from datetime import timedelta
-import base64
-from io import BytesIO
-from PIL import Image, ImageDraw
 
-# Load environment variables
+# Load environment variables from .env file
 load_dotenv()
 
 # Set up logging
@@ -23,226 +20,151 @@ DetectorFactory.seed = 0
 def create_app():
     app = Flask(__name__, template_folder="templates")
     
-    # Configuration
+    # Set the secret key (generate one if not provided in environment variables)
     app.config['SECRET_KEY'] = os.getenv("FLASK_SECRET_KEY", secrets.token_hex(16))
+    # Set session lifetime
     app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=1)
-    app.config['MAX_CONTENT_LENGTH'] = 20 * 1024 * 1024  # 20MB
-    
-    # Initialize OpenAI client
+    logger.debug(f"Secret Key: {app.config['SECRET_KEY']}")
+
+    logger.debug(f"Template folder path: {app.template_folder}")
+
+    # Initialize the OpenAI client using the API key from environment variables
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
         raise ValueError("OPENAI_API_KEY environment variable is not set.")
     client = OpenAI(api_key=api_key)
 
-    # Store conversation history
+    # Debug: Print the API key to verify it's loaded correctly
+    print("API Key loaded successfully.")
+
+    # Store conversation history in a dictionary (keyed by session ID)
     conversation_histories = {}
 
+    # Function to truncate conversation history (based on message count)
     def truncate_conversation(conversation_history, max_messages=100):
         while len(conversation_history) > max_messages:
-            conversation_history.pop(1)
+            conversation_history.pop(1)  # Remove the oldest user-assistant pair (keep system message)
         return conversation_history
 
+    # Routes
     @app.route("/")
     def home():
+        # Generate a new session ID if one doesn't exist
         if 'session_id' not in session:
             session['session_id'] = secrets.token_hex(16)
             session.permanent = True
+            logger.debug(f"Created new session ID: {session['session_id']}")
+        
+        logger.debug("Rendering home page...")
         return render_template("index.html")
 
     @app.route("/about")
     def about():
+        logger.debug("Rendering about page...")
         return render_template("about.html")
 
     @app.route("/services")
     def services():
+        logger.debug("Rendering services page...")
         return render_template("services.html")
 
     @app.route("/contact")
     def contact():
+        logger.debug("Rendering contact page...")
         return render_template("contact.html")
-
-    @app.route("/analyze-image", methods=["POST"])
-    def analyze_image():
-        if 'file' not in request.files:
-            return jsonify({"error": "No file uploaded"}), 400
-            
-        file = request.files['file']
-        if file.filename == '':
-            return jsonify({"error": "No selected file"}), 400
-            
-        user_prompt = request.form.get('prompt', '')
-            
-        try:
-            # Check file size
-            if file.content_length > 20 * 1024 * 1024:  # 20MB
-                return jsonify({"error": "File size exceeds 20MB limit"}), 400
-                
-            # Open the image
-            img = Image.open(file.stream)
-            
-            # Convert RGBA to RGB if needed with checkerboard background
-            if img.mode == 'RGBA':
-                background = Image.new('RGB', img.size, (242, 242, 242))
-                draw = ImageDraw.Draw(background)
-                size = 20
-                for x in range(0, img.size[0], size):
-                    for y in range(0, img.size[1], size):
-                        if (x//size + y//size) % 2 == 0:
-                            draw.rectangle([x, y, x+size, y+size], fill=(220, 220, 220))
-                background.paste(img, mask=img.split()[3])
-                img = background
-            
-            # Convert image to base64
-            buffered = BytesIO()
-            img.save(buffered, format="WEBP", quality=85)
-            img_base64 = base64.b64encode(buffered.getvalue()).decode('utf-8')
-            
-            # Get session ID
-            if 'session_id' not in session:
-                session['session_id'] = secrets.token_hex(16)
-                session.permanent = True
-            session_id = session['session_id']
-            
-            # Initialize conversation history if needed
-            if session_id not in conversation_histories:
-                conversation_histories[session_id] = [
-                    {
-                        "role": "system", 
-                        "content": "You are a helpful AI assistant that responds only in English or Arabic. "
-                                  "Never respond in any other language. If the user speaks another language, "
-                                  "politely inform them you only understand English and Arabic. "
-                                  "أنا مساعد مفيد أتحدث الإنجليزية والعربية فقط. لا أستطيع الرد بأي لغة أخرى."
-                    }
-                ]
-            
-            # Prepare the image URL object
-            image_url_object = {
-                "url": f"data:image/webp;base64,{img_base64}"
-            }
-            
-            # Create message content array
-            message_content = []
-            
-            # Add text if provided
-            if user_prompt:
-                # Verify prompt language
-                try:
-                    lang = detect(user_prompt)
-                    if lang not in ["ar", "en"]:
-                        return jsonify({
-                            "error": "I only respond in English or Arabic. / أرد باللغة الإنجليزية أو العربية فقط"
-                        }), 400
-                except (LangDetectException, Exception):
-                    pass  # Skip detection if it fails
-                
-                message_content.append({"type": "text", "text": user_prompt})
-            
-            # Add image
-            message_content.append({
-                "type": "image_url",
-                "image_url": image_url_object
-            })
-            
-            # Add user message with properly structured content
-            conversation_histories[session_id].append({
-                "role": "user",
-                "content": message_content
-            })
-            
-            # Call OpenAI API with GPT-4o
-            response = client.chat.completions.create(
-                model="gpt-4o",
-                messages=conversation_histories[session_id],
-                max_tokens=1500,
-                temperature=0.7
-            )
-            
-            # Get the response
-            analysis = response.choices[0].message.content
-            
-            # Add assistant response to conversation history
-            conversation_histories[session_id].append({
-                "role": "assistant",
-                "content": analysis
-            })
-            
-            return jsonify({
-                "analysis": analysis,
-                "model_used": "gpt-4o"
-            })
-            
-        except Exception as e:
-            logger.error(f"Error analyzing image: {e}")
-            return jsonify({"error": str(e)}), 500
 
     @app.route("/chat", methods=["GET"])
     def chat_stream():
         user_input = request.args.get("message", "").strip()
         
+        # Ensure we have a session ID
         if 'session_id' not in session:
             session['session_id'] = secrets.token_hex(16)
             session.permanent = True
+            logger.debug(f"Created new session ID: {session['session_id']}")
         
         session_id = session['session_id']
-            
+        logger.debug(f"Using session ID: {session_id}")
+        
+        # Handle empty messages
         if not user_input:
+            logger.debug("Empty message received")
             return jsonify({"response": "Please enter a message."}), 400
             
+        # Handle language detection with error handling
         try:
-            # Detect and enforce Arabic/English only
             lang = detect(user_input)
-            if lang not in ["ar", "en"]:
-                return jsonify({
-                    "response": "I only respond in English or Arabic. / أرد باللغة الإنجليزية أو العربية فقط"
-                }), 400
-        except (LangDetectException, Exception):
-            lang = "en"  # Default to English
+            logger.debug(f"Detected language: {lang}")
+        except LangDetectException as e:
+            logger.warning(f"Language detection failed: {e}, defaulting to English")
+            lang = "en"  # Default to English on detection failure
+        except Exception as e:
+            logger.warning(f"Unexpected error in language detection: {e}, defaulting to English")
+            lang = "en"
+            
+        logger.debug(f"Received user input: {user_input} (Language: {lang})")
+
+        # Handle exit command
+        if user_input.lower() == "exit":
+            logger.debug("Exit command received.")
+            return jsonify({"response": "Goodbye!"})
+
+        # Check if the input contains words similar to other languages
+        if lang not in ["ar", "en"]:
+            # If the detected language is not Arabic or English, force English
+            lang = "en"
+            logger.debug(f"Input contains non-Arabic/English words. Forcing response in English.")
 
         try:
+            # Initialize conversation history for the session if it doesn't exist
             if session_id not in conversation_histories:
                 conversation_histories[session_id] = [
-                    {
-                        "role": "system", 
-                        "content": "You are a helpful assistant that responds exclusively in English or Arabic. "
-                                  "Never respond in any other language. If the user speaks another language, "
-                                  "politely inform them you only understand English and Arabic. "
-                                  "أنا مساعد مفيد أتحدث الإنجليزية والعربية فقط. لا أستطيع الرد بأي لغة أخرى."
-                    }
+                    {"role": "system", "content": "You are a helpful assistant that responds in the same language as the user's input."}
                 ]
 
+            # Add user message to conversation history
             conversation_histories[session_id].append({"role": "user", "content": user_input})
-            conversation_histories[session_id] = truncate_conversation(conversation_histories[session_id])
 
+            # Truncate conversation history if it exceeds the message limit
+            conversation_histories[session_id] = truncate_conversation(conversation_histories[session_id], max_messages=100)
+
+            logger.debug("Sending request to GPT-4 API...")
             response = client.chat.completions.create(
-                model="gpt-4o",
+                model="gpt-4",  # Use "gpt-4" or "gpt-4-1106-preview"
                 messages=conversation_histories[session_id],
-                stream=True,
-                temperature=0.7
+                stream=True  # Enable streaming
             )
 
+            # Stream the response back to the client
             def generate():
                 full_response = ""
                 for chunk in response:
                     if chunk.choices[0].delta.content:
                         chunk_content = chunk.choices[0].delta.content
                         full_response += chunk_content
-                        yield f"data: {chunk_content}\n\n".encode('utf-8')
-                yield "data: [END]\n\n".encode('utf-8')
+                        yield f"data: {chunk_content}\n\n".encode('utf-8')  # Send each chunk individually
+                yield "data: [END]\n\n".encode('utf-8')  # Signal the end of the response
+
+                # Add assistant's response to conversation history
                 conversation_histories[session_id].append({"role": "assistant", "content": full_response})
 
             return Response(generate(), mimetype="text/event-stream; charset=utf-8")
         except Exception as e:
             logger.error(f"Error during chat: {e}")
-            return jsonify({"response": "An error occurred. / حدث خطأ"}), 500
+            return jsonify({"response": "An error occurred while processing your request."}), 500
 
+    # Add a route to clear the session/start a new chat
     @app.route("/new_chat", methods=["GET"])
     def new_chat():
+        # Generate a new session ID
         session['session_id'] = secrets.token_hex(16)
         session.permanent = True
+        logger.debug(f"Created new session ID: {session['session_id']}")
         return jsonify({"status": "success", "message": "New chat session created"})
 
     return app
 
+# Create the Flask app
 app = create_app()
 
 if __name__ == "__main__":
