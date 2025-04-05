@@ -7,6 +7,7 @@ from dotenv import load_dotenv
 from langdetect import detect, DetectorFactory, LangDetectException
 from datetime import timedelta
 import base64
+import re
 
 # Load environment variables from .env file
 load_dotenv()
@@ -47,6 +48,29 @@ def create_app():
             conversation_history.pop(1)  # Remove the oldest user-assistant pair (keep system message)
         return conversation_history
 
+    # Function to format response text with proper spacing
+    def format_response_text(text):
+        if not text:
+            return ""
+            
+        # Add spaces between words that are stuck together
+        text = re.sub(r'([a-z])([A-Z])', r'\1 \2', text)
+        # Add space after punctuation
+        text = re.sub(r'([.,!?])([A-Za-z])', r'\1 \2', text)
+        # Fix common instances of stuck-together words
+        text = re.sub(r'(?<=[a-z])(?=[A-Z])', ' ', text)  # Additional fix for camelCase
+        # Fix "AsanAI" type patterns - look for sequences like 'As', 'an', 'AI', etc.
+        text = re.sub(r'\b([A-Z][a-z]+)([A-Z][a-z]+)', r'\1 \2', text)
+        # Fix "Iamnotableto" type patterns
+        text = re.sub(r'\b(I)(am|can|will|have|do|would)', r'\1 \2', text)
+        # Fix instances where multiple words are completely stuck together
+        text = re.sub(r'([a-z])([A-Z])', r'\1 \2', text)
+        # This regex splits words that have no spaces after punctuation
+        text = re.sub(r'([.,!?:;])([A-Za-z])', r'\1 \2', text)
+        # Remove extra spaces
+        text = ' '.join(text.split())
+        return text
+
     # Routes
     @app.route("/")
     def home():
@@ -74,6 +98,45 @@ def create_app():
         logger.debug("Rendering contact page...")
         return render_template("contact.html")
 
+    @app.route("/upload-image", methods=["POST"])
+    def upload_image():
+        try:
+            if 'session_id' not in session:
+                session['session_id'] = secrets.token_hex(16)
+                session.permanent = True
+            
+            session_id = session['session_id']
+            
+            uploaded_file = request.files.get('file')
+            if not uploaded_file:
+                return jsonify({"error": "No file uploaded"}), 400
+            
+            if not uploaded_file.content_type.startswith('image/'):
+                return jsonify({"error": "Only image files are allowed"}), 400
+            
+            # Store the image in memory (for demo purposes - in production you might want to save to disk)
+            image_bytes = uploaded_file.read()
+            base64_image = base64.b64encode(image_bytes).decode('utf-8')
+            
+            # Store in session
+            if 'uploaded_images' not in session:
+                session['uploaded_images'] = []
+            
+            session['uploaded_images'].append({
+                'filename': uploaded_file.filename,
+                'content_type': uploaded_file.content_type,
+                'base64': base64_image
+            })
+            
+            return jsonify({
+                "success": True,
+                "filename": uploaded_file.filename
+            })
+            
+        except Exception as e:
+            logger.error(f"Error uploading image: {e}")
+            return jsonify({"error": str(e)}), 500
+
     @app.route("/chat", methods=["GET"])
     def chat_stream():
         user_input = request.args.get("message", "").strip()
@@ -88,13 +151,13 @@ def create_app():
         logger.debug(f"Using session ID: {session_id}")
         
         # Handle empty messages
-        if not user_input:
-            logger.debug("Empty message received")
-            return jsonify({"response": "Please enter a message."}), 400
+        if not user_input and not ('uploaded_images' in session and session['uploaded_images']):
+            logger.debug("Empty message received with no images")
+            return jsonify({"response": "Please enter a message or upload an image."}), 400
             
         # Handle language detection with error handling
         try:
-            lang = detect(user_input)
+            lang = detect(user_input) if user_input else "en"
             logger.debug(f"Detected language: {lang}")
         except LangDetectException as e:
             logger.warning(f"Language detection failed: {e}, defaulting to English")
@@ -105,130 +168,109 @@ def create_app():
             
         logger.debug(f"Received user input: {user_input} (Language: {lang})")
 
-        # Handle exit command
-        if user_input.lower() == "exit":
-            logger.debug("Exit command received.")
-            return jsonify({"response": "Goodbye!"})
-
-        # Check if the input contains words similar to other languages
-        if lang not in ["ar", "en"]:
-            # If the detected language is not Arabic or English, force English
-            lang = "en"
-            logger.debug(f"Input contains non-Arabic/English words. Forcing response in English.")
-
         try:
             # Initialize conversation history for the session if it doesn't exist
             if session_id not in conversation_histories:
                 conversation_histories[session_id] = [
-                    {"role": "system", "content": "You are a helpful assistant that responds in the same language as the user's input."}
+                    {
+                        "role": "system", 
+                        "content": "You are a helpful AI assistant that can analyze images. You should fully describe what you see in images, provide detailed analysis, and answer questions about them. Always respond with proper spacing between words and coherent sentences. Never say you can't analyze images - you have full image analysis capabilities."
+                    }
                 ]
 
-            # Add user message to conversation history
-            conversation_histories[session_id].append({"role": "user", "content": user_input})
-
-            # Truncate conversation history if it exceeds the message limit
-            conversation_histories[session_id] = truncate_conversation(conversation_histories[session_id], max_messages=100)
-
-            logger.debug("Sending request to GPT-4 API...")
-            response = client.chat.completions.create(
-                model="gpt-4",  # Use "gpt-4" or "gpt-4-1106-preview"
-                messages=conversation_histories[session_id],
-                stream=True  # Enable streaming
-            )
-
-            # Stream the response back to the client
-            def generate():
-                full_response = ""
-                for chunk in response:
-                    if chunk.choices[0].delta.content:
-                        chunk_content = chunk.choices[0].delta.content
-                        full_response += chunk_content
-                        yield f"data: {chunk_content}\n\n".encode('utf-8')  # Send each chunk individually
-                yield "data: [END]\n\n".encode('utf-8')  # Signal the end of the response
-
+            # Check if there are uploaded images in the session
+            has_images = 'uploaded_images' in session and session['uploaded_images']
+            
+            if has_images:
+                # Create the message with images
+                message_content = [
+                    {"type": "text", "text": user_input or "Please analyze this image"}
+                ]
+                
+                # Add all uploaded images
+                for img in session['uploaded_images']:
+                    message_content.append({
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:{img['content_type']};base64,{img['base64']}"
+                        }
+                    })
+                
+                # Add to conversation history as a user message with images
+                conversation_histories[session_id].append({
+                    "role": "user",
+                    "content": message_content
+                })
+                
+                # Clear the uploaded images after sending
+                session.pop('uploaded_images', None)
+                
+                # Use vision model for image requests
+                response = client.chat.completions.create(
+                    model="gpt-4-vision-preview",
+                    messages=conversation_histories[session_id],
+                    max_tokens=1000
+                )
+                
+                # Get the full response and format it
+                full_response = response.choices[0].message.content
+                formatted_response = format_response_text(full_response)
+                
                 # Add assistant's response to conversation history
-                conversation_histories[session_id].append({"role": "assistant", "content": full_response})
+                conversation_histories[session_id].append({
+                    "role": "assistant",
+                    "content": formatted_response
+                })
+                
+                return jsonify({"response": formatted_response})
+            else:
+                # Regular text message
+                conversation_histories[session_id].append({"role": "user", "content": user_input})
 
-            return Response(generate(), mimetype="text/event-stream; charset=utf-8")
+                # Truncate conversation history if it exceeds the message limit
+                conversation_histories[session_id] = truncate_conversation(conversation_histories[session_id], max_messages=100)
+
+                logger.debug("Sending request to GPT-4 API...")
+                
+                # Stream text response
+                response = client.chat.completions.create(
+                    model="gpt-4",
+                    messages=conversation_histories[session_id],
+                    stream=True
+                )
+
+                # Stream the response back to the client
+                def generate():
+                    full_response = ""
+                    for chunk in response:
+                        if chunk.choices[0].delta.content:
+                            chunk_content = chunk.choices[0].delta.content
+                            full_response += chunk_content
+                            yield f"data: {chunk_content}\n\n".encode('utf-8')
+                    yield "data: [END]\n\n".encode('utf-8')
+
+                    # Format and add assistant's response to conversation history
+                    formatted_response = format_response_text(full_response)
+                    conversation_histories[session_id].append({
+                        "role": "assistant", 
+                        "content": formatted_response
+                    })
+
+                return Response(generate(), mimetype="text/event-stream; charset=utf-8")
+                
         except Exception as e:
             logger.error(f"Error during chat: {e}")
             return jsonify({"response": "An error occurred while processing your request."}), 500
-
-    @app.route("/chat-with-image", methods=["POST"])
-    def chat_with_image():
-        try:
-            # Get uploaded file and text prompt
-            uploaded_file = request.files.get('file')
-            user_input = request.form.get('prompt', '').strip()
-            
-            if not uploaded_file:
-                return jsonify({"error": "Image file is required"}), 400
-            if not user_input:
-                return jsonify({"error": "Text prompt is required"}), 400
-
-            # Validate file is an image
-            if not uploaded_file.content_type.startswith('image/'):
-                return jsonify({"error": "Only image files are allowed"}), 400
-
-            # Ensure we have a session ID
-            if 'session_id' not in session:
-                session['session_id'] = secrets.token_hex(16)
-                session.permanent = True
-            
-            session_id = session['session_id']
-            
-            # Initialize conversation history if needed
-            if session_id not in conversation_histories:
-                conversation_histories[session_id] = [
-                    {"role": "system", "content": "You are a helpful assistant that can analyze images and answer questions about them."}
-                ]
-
-            # Read the image file
-            image_bytes = uploaded_file.read()
-            base64_image = base64.b64encode(image_bytes).decode('utf-8')
-
-            # Get GPT-4 vision response
-            response = client.chat.completions.create(
-                model="gpt-4-vision-preview",
-                messages=[
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": user_input},
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": f"data:image/{uploaded_file.content_type.split('/')[-1]};base64,{base64_image}"
-                                }
-                            }
-                        ]
-                    }
-                ],
-                max_tokens=1000
-            )
-
-            # Add to conversation history
-            conversation_histories[session_id].append({
-                "role": "user",
-                "content": f"{user_input} [Attached image: {uploaded_file.filename}]"
-            })
-            conversation_histories[session_id].append({
-                "role": "assistant",
-                "content": response.choices[0].message.content
-            })
-
-            return jsonify({
-                "response": response.choices[0].message.content
-            })
-
-        except Exception as e:
-            logger.error(f"Error in image chat: {e}")
-            return jsonify({"error": str(e)}), 500
 
     # Add a route to clear the session/start a new chat
     @app.route("/new_chat", methods=["GET"])
     def new_chat():
         # Generate a new session ID
+        session_id = session['session_id'] if 'session_id' in session else None
+        if session_id in conversation_histories:
+            del conversation_histories[session_id]
+        
+        session.clear()
         session['session_id'] = secrets.token_hex(16)
         session.permanent = True
         logger.debug(f"Created new session ID: {session['session_id']}")

@@ -124,14 +124,6 @@ function toggleSendStop() {
         isStreaming = false;
         sendStopBtn.classList.remove('stop-mode');
         sendStopBtn.innerHTML = '<i class="fas fa-arrow-up"></i>';
-        
-        // Remove loading message if exists
-        const loadingMessages = document.querySelectorAll('.message.received');
-        loadingMessages.forEach(msg => {
-            if (msg.textContent.includes('Thinking...') || msg.textContent.includes('Analyzing image...')) {
-                msg.remove();
-            }
-        });
     }
 }
 
@@ -144,8 +136,6 @@ async function sendMessage() {
     displayUserMessage(message);
     userInput.value = "";
     userInput.style.height = "auto";
-
-    const loadingMessage = createLoadingMessage();
     
     try {
         if (uploadedImage) {
@@ -179,16 +169,6 @@ function displayUserMessage(message) {
     
     chatMessages.appendChild(userMessage);
     scrollToBottom();
-}
-
-function createLoadingMessage() {
-    const chatMessages = document.getElementById("chat-messages");
-    const loadingMessage = document.createElement("div");
-    loadingMessage.className = "message received";
-    loadingMessage.innerHTML = uploadedImage ? "<p>Analyzing image...</p>" : "<p>Thinking...</p>";
-    chatMessages.appendChild(loadingMessage);
-    scrollToBottom();
-    return loadingMessage;
 }
 
 async function sendImageWithMessage(message) {
@@ -255,9 +235,6 @@ async function sendTextMessage(message) {
 
 function displayBotResponse(response) {
     const chatMessages = document.getElementById("chat-messages");
-    const loadingMessage = document.querySelector('.message.received:last-child');
-    if (loadingMessage) chatMessages.removeChild(loadingMessage);
-
     const botMessage = document.createElement("div");
     botMessage.className = "message received";
     botMessage.innerHTML = `
@@ -277,9 +254,6 @@ function displayBotResponse(response) {
 function handleSendError(error) {
     console.error("Error:", error);
     const chatMessages = document.getElementById("chat-messages");
-    const loadingMessage = document.querySelector('.message.received:last-child');
-    if (loadingMessage) chatMessages.removeChild(loadingMessage);
-
     const errorMessage = document.createElement("div");
     errorMessage.className = "message received error";
     errorMessage.innerHTML = `<p>Error: ${error.message}</p>`;
