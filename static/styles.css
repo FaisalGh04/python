@@ -245,14 +245,16 @@ nav a {
 .image-preview-container {
     position: relative;
     display: inline-block;
-    margin-top: 5px;
+    margin: 5px 0;
+    max-width: 200px;
 }
 
 .image-preview {
     max-width: 100%;
-    max-height: 100px;
-    border-radius: 10px;
-    border: 2px solid #ddd;
+    max-height: 150px;
+    border-radius: 8px;
+    border: 1px solid #ddd;
+    display: block;
 }
 
 .remove-image {

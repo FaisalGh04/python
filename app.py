@@ -6,6 +6,7 @@ import secrets
 from dotenv import load_dotenv
 from langdetect import detect, DetectorFactory, LangDetectException
 from datetime import timedelta
+import base64
 
 # Load environment variables from .env file
 load_dotenv()
@@ -152,6 +153,77 @@ def create_app():
         except Exception as e:
             logger.error(f"Error during chat: {e}")
             return jsonify({"response": "An error occurred while processing your request."}), 500
+
+    @app.route("/chat-with-image", methods=["POST"])
+    def chat_with_image():
+        try:
+            # Get uploaded file and text prompt
+            uploaded_file = request.files.get('file')
+            user_input = request.form.get('prompt', '').strip()
+            
+            if not uploaded_file:
+                return jsonify({"error": "Image file is required"}), 400
+            if not user_input:
+                return jsonify({"error": "Text prompt is required"}), 400
+
+            # Validate file is an image
+            if not uploaded_file.content_type.startswith('image/'):
+                return jsonify({"error": "Only image files are allowed"}), 400
+
+            # Ensure we have a session ID
+            if 'session_id' not in session:
+                session['session_id'] = secrets.token_hex(16)
+                session.permanent = True
+            
+            session_id = session['session_id']
+            
+            # Initialize conversation history if needed
+            if session_id not in conversation_histories:
+                conversation_histories[session_id] = [
+                    {"role": "system", "content": "You are a helpful assistant that can analyze images and answer questions about them."}
+                ]
+
+            # Read the image file
+            image_bytes = uploaded_file.read()
+            base64_image = base64.b64encode(image_bytes).decode('utf-8')
+
+            # Get GPT-4 vision response
+            response = client.chat.completions.create(
+                model="gpt-4-vision-preview",
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": user_input},
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:image/{uploaded_file.content_type.split('/')[-1]};base64,{base64_image}"
+                                }
+                            }
+                        ]
+                    }
+                ],
+                max_tokens=1000
+            )
+
+            # Add to conversation history
+            conversation_histories[session_id].append({
+                "role": "user",
+                "content": f"{user_input} [Attached image: {uploaded_file.filename}]"
+            })
+            conversation_histories[session_id].append({
+                "role": "assistant",
+                "content": response.choices[0].message.content
+            })
+
+            return jsonify({
+                "response": response.choices[0].message.content
+            })
+
+        except Exception as e:
+            logger.error(f"Error in image chat: {e}")
+            return jsonify({"error": str(e)}), 500
 
     # Add a route to clear the session/start a new chat
     @app.route("/new_chat", methods=["GET"])
