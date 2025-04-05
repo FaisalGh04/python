@@ -1,5 +1,5 @@
 // Global variables
-let uploadedImage = null;
+let uploadedImages = [];
 let isStreaming = false;
 let eventSource = null;
 
@@ -13,22 +13,39 @@ function escapeHtml(unsafe) {
         .replace(/'/g, "&#039;");
 }
 
+// Function to fix stuck-together words in responses
+function formatResponseText(text) {
+    if (!text) return "";
+    
+    text = text.replace(/([a-z])([A-Z])/g, '$1 $2');
+    text = text.replace(/([.,!?:;])([A-Za-z])/g, '$1 $2');
+    text = text.replace(/(?<=[a-z])(?=[A-Z])/g, ' ');
+    text = text.replace(/\b([A-Z][a-z]+)([A-Z][a-z]+)/g, '$1 $2');
+    text = text.replace(/\b(I)(am|can|will|have|do|would)/g, '$1 $2');
+    text = text.replace(/\s+/g, ' ').trim();
+    return text;
+}
+
 // Scroll functionality
 function toggleScrollButton() {
     const chatMessages = document.getElementById("chat-messages");
     const scrollButton = document.getElementById("scroll-to-bottom");
 
-    if (chatMessages.scrollTop + chatMessages.clientHeight < chatMessages.scrollHeight - 50) {
-        scrollButton.style.display = "block";
-    } else {
-        scrollButton.style.display = "none";
+    if (chatMessages && scrollButton) {
+        if (chatMessages.scrollTop + chatMessages.clientHeight < chatMessages.scrollHeight - 50) {
+            scrollButton.style.display = "block";
+        } else {
+            scrollButton.style.display = "none";
+        }
     }
 }
 
 function scrollToBottom() {
     const chatMessages = document.getElementById("chat-messages");
-    chatMessages.scrollTop = chatMessages.scrollHeight;
-    toggleScrollButton();
+    if (chatMessages) {
+        chatMessages.scrollTop = chatMessages.scrollHeight;
+        toggleScrollButton();
+    }
 }
 
 // Copy button functionality
@@ -39,10 +56,12 @@ function addCopyButtonFunctionality() {
             const feedback = this.parentElement.querySelector('.copy-feedback');
             
             navigator.clipboard.writeText(textToCopy).then(() => {
-                feedback.style.display = 'inline-block';
-                setTimeout(() => {
-                    feedback.style.display = 'none';
-                }, 2000);
+                if (feedback) {
+                    feedback.style.display = 'inline-block';
+                    setTimeout(() => {
+                        feedback.style.display = 'none';
+                    }, 2000);
+                }
             }).catch(err => {
                 console.error('Failed to copy text: ', err);
             });
@@ -52,33 +71,36 @@ function addCopyButtonFunctionality() {
 
 // Image handling functions
 function handleImageUpload(e) {
-    const file = e.target.files[0];
-    if (!file) return;
+    const files = e.target.files;
+    if (!files || files.length === 0) return;
     
-    // Validate file type
-    if (!file.type.match('image.*')) {
-        showError("Please select an image file (JPEG, PNG, GIF, etc.)");
-        e.target.value = "";
-        return;
+    for (let i = 0; i < files.length; i++) {
+        const file = files[i];
+        
+        if (!file.type.match('image.*')) {
+            showError("Please select image files only (JPEG, PNG, GIF, etc.)");
+            e.target.value = "";
+            return;
+        }
+        
+        if (file.size > 10 * 1024 * 1024) {
+            showError("Image size should be less than 10MB");
+            e.target.value = "";
+            return;
+        }
+        
+        uploadedImages.push(file);
+        displayImagePreview(file);
     }
     
-    // Validate file size
-    if (file.size > 10 * 1024 * 1024) {
-        showError("Image size should be less than 10MB");
-        e.target.value = "";
-        return;
-    }
-    
-    uploadedImage = file;
-    displayImagePreview(file);
     e.target.value = "";
 }
 
 function displayImagePreview(file) {
-    removeImagePreview();
-    
+    const previewArea = document.getElementById("image-preview-area");
+    if (!previewArea) return;
+
     const previewContainer = document.createElement("div");
-    previewContainer.id = "image-preview-container";
     previewContainer.className = "image-preview-container";
     
     const imgPreview = document.createElement("img");
@@ -89,28 +111,44 @@ function displayImagePreview(file) {
     const removeBtn = document.createElement("div");
     removeBtn.className = "remove-image";
     removeBtn.innerHTML = "✕";
-    removeBtn.onclick = removeImagePreview;
+    removeBtn.onclick = function() {
+        removeImagePreview(file, previewContainer);
+    };
     
     previewContainer.appendChild(imgPreview);
     previewContainer.appendChild(removeBtn);
-    
-    const chatInput = document.getElementById("chat-input");
-    chatInput.insertBefore(previewContainer, document.getElementById("user-input"));
+    previewArea.appendChild(previewContainer);
+    previewArea.style.display = "block";
 }
 
-function removeImagePreview() {
-    const existingPreview = document.getElementById("image-preview-container");
-    if (existingPreview) {
-        URL.revokeObjectURL(existingPreview.querySelector('img').src);
-        existingPreview.remove();
+function removeImagePreview(file, container) {
+    if (!container) return;
+    
+    container.remove();
+    uploadedImages = uploadedImages.filter(f => f !== file);
+    
+    const previewArea = document.getElementById("image-preview-area");
+    if (previewArea && uploadedImages.length === 0) {
+        previewArea.style.display = "none";
     }
-    uploadedImage = null;
-    document.getElementById('image-upload').value = "";
+    
+    URL.revokeObjectURL(file);
+}
+
+function clearImagePreviews() {
+    const previewArea = document.getElementById("image-preview-area");
+    if (previewArea) {
+        previewArea.innerHTML = "";
+        previewArea.style.display = "none";
+        uploadedImages.forEach(file => URL.revokeObjectURL(file));
+        uploadedImages = [];
+    }
 }
 
 // Message handling functions
 function toggleSendStop() {
     const sendStopBtn = document.getElementById('send-stop-btn');
+    if (!sendStopBtn) return;
     
     if (!isStreaming) {
         sendMessage();
@@ -129,17 +167,18 @@ function toggleSendStop() {
 
 async function sendMessage() {
     const userInput = document.getElementById("user-input");
-    const message = userInput.value.trim();
+    if (!userInput) return;
     
-    if (!message && !uploadedImage) return;
+    const message = userInput.value.trim();
+    if (!message && uploadedImages.length === 0) return;
 
     displayUserMessage(message);
     userInput.value = "";
     userInput.style.height = "auto";
     
     try {
-        if (uploadedImage) {
-            await sendImageWithMessage(message);
+        if (uploadedImages.length > 0) {
+            await sendImagesWithMessage(message);
         } else {
             await sendTextMessage(message);
         }
@@ -147,12 +186,14 @@ async function sendMessage() {
         handleSendError(error);
     } finally {
         resetSendButton();
-        removeImagePreview();
+        clearImagePreviews();
     }
 }
 
 function displayUserMessage(message) {
     const chatMessages = document.getElementById("chat-messages");
+    if (!chatMessages) return;
+    
     const userMessage = document.createElement("div");
     userMessage.className = "message sent";
     
@@ -160,47 +201,132 @@ function displayUserMessage(message) {
         userMessage.innerHTML = `<p>${message}</p>`;
     }
     
-    if (uploadedImage) {
-        const imgElement = document.createElement("img");
-        imgElement.src = URL.createObjectURL(uploadedImage);
-        imgElement.alt = "Uploaded image";
-        userMessage.appendChild(imgElement);
+    if (uploadedImages.length > 0) {
+        uploadedImages.forEach(file => {
+            const imgElement = document.createElement("img");
+            imgElement.src = URL.createObjectURL(file);
+            imgElement.alt = "Uploaded image";
+            userMessage.appendChild(imgElement);
+        });
     }
     
     chatMessages.appendChild(userMessage);
     scrollToBottom();
 }
 
-async function sendImageWithMessage(message) {
-    const formData = new FormData();
-    if (message) formData.append("prompt", message);
-    formData.append("file", uploadedImage);
-    formData.append("filename", uploadedImage.name);
+async function sendImagesWithMessage(message) {
+    try {
+        const uploadPromises = uploadedImages.map(file => {
+            const formData = new FormData();
+            formData.append("file", file);
+            return fetch("/upload-image", {
+                method: "POST",
+                body: formData
+            }).then(res => {
+                if (!res.ok) throw new Error('Upload failed');
+                return res.json();
+            });
+        });
 
-    const response = await fetch("/chat-with-image", {
-        method: "POST",
-        body: formData
-    });
+        await Promise.all(uploadPromises);
 
-    if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
+        const response = await fetch(`/chat?message=${encodeURIComponent(message || "What's in this image?")}`);
+        
+        if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+        }
+
+        const contentType = response.headers.get('content-type');
+        
+        if (contentType && contentType.includes('application/json')) {
+            const data = await response.json();
+            if (data.error) throw new Error(data.error);
+            displayBotResponse(data.response);
+        } else {
+            const reader = response.body.getReader();
+            const decoder = new TextDecoder();
+            let botMessage = createBotMessageElement();
+            let fullText = "";
+            
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                
+                const chunk = decoder.decode(value);
+                const lines = chunk.split('\n');
+                
+                for (const line of lines) {
+                    if (line.startsWith('data: ')) {
+                        const content = line.substring(6).trim();
+                        if (content === '[END]') {
+                            finalizeBotMessage(botMessage, fullText);
+                            return;
+                        }
+                        fullText += content;
+                        appendToBotMessage(botMessage, content);
+                    }
+                }
+            }
+        }
+    } catch (error) {
+        throw error;
     }
+}
 
-    const data = await response.json();
-    if (data.error) throw new Error(data.error);
+function createBotMessageElement() {
+    const chatMessages = document.getElementById("chat-messages");
+    const botMessage = document.createElement("div");
+    botMessage.className = "message received";
+    botMessage.innerHTML = `
+        <p></p>
+        <div class="copy-btn-container">
+            <button class="copy-btn" style="display:none" data-text="">
+                <i class="far fa-copy"></i>
+            </button>
+            <span class="copy-feedback">Copied!</span>
+        </div>
+    `;
+    chatMessages.appendChild(botMessage);
+    return botMessage;
+}
 
-    displayBotResponse(data.response);
+function appendToBotMessage(botMessage, content) {
+    const pElement = botMessage.querySelector("p");
+    if (pElement) {
+        pElement.textContent += content;
+        scrollToBottom();
+    }
+}
+
+function finalizeBotMessage(botMessage, fullText) {
+    const pElement = botMessage.querySelector("p");
+    if (pElement) {
+        const formattedText = formatResponseText(fullText || pElement.textContent);
+        pElement.textContent = formattedText;
+        
+        const copyBtn = botMessage.querySelector(".copy-btn");
+        if (copyBtn) {
+            copyBtn.style.display = "inline-block";
+            copyBtn.setAttribute("data-text", escapeHtml(formattedText));
+            addCopyButtonFunctionality();
+        }
+    }
+    scrollToBottom();
 }
 
 async function sendTextMessage(message) {
     return new Promise((resolve, reject) => {
         eventSource = new EventSource(`/chat?message=${encodeURIComponent(message)}`);
         const chatMessages = document.getElementById("chat-messages");
+        if (!chatMessages) {
+            reject(new Error("Chat messages container not found"));
+            return;
+        }
         
         const botMessage = document.createElement("div");
         botMessage.className = "message received";
         botMessage.innerHTML = `
-            <p>AI: </p>
+            <p></p>
             <div class="copy-btn-container">
                 <button class="copy-btn" style="display:none" data-text="">
                     <i class="far fa-copy"></i>
@@ -211,18 +337,28 @@ async function sendTextMessage(message) {
         chatMessages.appendChild(botMessage);
         scrollToBottom();
 
+        let fullText = "";
         eventSource.onmessage = (event) => {
             if (event.data === "[END]") {
                 eventSource.close();
-                const fullText = botMessage.querySelector("p").textContent;
+                const responseElement = botMessage.querySelector("p");
+                const formattedText = formatResponseText(fullText);
+                responseElement.textContent = formattedText;
+                
                 const copyBtn = botMessage.querySelector(".copy-btn");
-                copyBtn.style.display = "inline-block";
-                copyBtn.setAttribute("data-text", escapeHtml(fullText));
-                addCopyButtonFunctionality();
+                if (copyBtn) {
+                    copyBtn.style.display = "inline-block";
+                    copyBtn.setAttribute("data-text", escapeHtml(formattedText));
+                    addCopyButtonFunctionality();
+                }
                 resolve();
             } else {
-                botMessage.querySelector("p").textContent += event.data;
-                toggleScrollButton();
+                const pElement = botMessage.querySelector("p");
+                if (pElement) {
+                    fullText += event.data;
+                    pElement.textContent = fullText;
+                    toggleScrollButton();
+                }
             }
         };
 
@@ -235,12 +371,16 @@ async function sendTextMessage(message) {
 
 function displayBotResponse(response) {
     const chatMessages = document.getElementById("chat-messages");
+    if (!chatMessages) return;
+
     const botMessage = document.createElement("div");
     botMessage.className = "message received";
+    const formattedResponse = formatResponseText(response);
+    
     botMessage.innerHTML = `
-        <p>${response}</p>
+        <p>${formattedResponse}</p>
         <div class="copy-btn-container">
-            <button class="copy-btn" data-text="${escapeHtml(response)}">
+            <button class="copy-btn" data-text="${escapeHtml(formattedResponse)}">
                 <i class="far fa-copy"></i>
             </button>
             <span class="copy-feedback">Copied!</span>
@@ -254,6 +394,8 @@ function displayBotResponse(response) {
 function handleSendError(error) {
     console.error("Error:", error);
     const chatMessages = document.getElementById("chat-messages");
+    if (!chatMessages) return;
+
     const errorMessage = document.createElement("div");
     errorMessage.className = "message received error";
     errorMessage.innerHTML = `<p>Error: ${error.message}</p>`;
@@ -263,12 +405,17 @@ function handleSendError(error) {
 
 function resetSendButton() {
     isStreaming = false;
-    document.getElementById('send-stop-btn').classList.remove('stop-mode');
-    document.getElementById('send-stop-btn').innerHTML = '<i class="fas fa-arrow-up"></i>';
+    const sendStopBtn = document.getElementById('send-stop-btn');
+    if (sendStopBtn) {
+        sendStopBtn.classList.remove('stop-mode');
+        sendStopBtn.innerHTML = '<i class="fas fa-arrow-up"></i>';
+    }
 }
 
 function showError(message) {
     const chatMessages = document.getElementById("chat-messages");
+    if (!chatMessages) return;
+    
     const errorMessage = document.createElement("div");
     errorMessage.className = "message received error";
     errorMessage.innerHTML = `<p>${message}</p>`;
@@ -288,63 +435,109 @@ function startVoiceRecognition() {
     recognition.interimResults = false;
 
     recognition.onstart = function() {
-        document.getElementById("voice-btn").style.backgroundColor = "#ff0000";
+        const voiceBtn = document.getElementById("voice-btn");
+        if (voiceBtn) voiceBtn.style.backgroundColor = "#ff0000";
     };
 
     recognition.onresult = function(event) {
         const transcript = event.results[0][0].transcript;
-        document.getElementById("user-input").value = transcript;
-        document.getElementById("voice-btn").style.backgroundColor = "#000000";
+        const userInput = document.getElementById("user-input");
+        if (userInput) userInput.value = transcript;
+        const voiceBtn = document.getElementById("voice-btn");
+        if (voiceBtn) voiceBtn.style.backgroundColor = "#000000";
     };
 
     recognition.onerror = function(event) {
         console.error("Voice recognition error", event.error);
-        document.getElementById("voice-btn").style.backgroundColor = "#000000";
+        const voiceBtn = document.getElementById("voice-btn");
+        if (voiceBtn) voiceBtn.style.backgroundColor = "#000000";
     };
 
     recognition.onend = function() {
-        document.getElementById("voice-btn").style.backgroundColor = "#000000";
+        const voiceBtn = document.getElementById("voice-btn");
+        if (voiceBtn) voiceBtn.style.backgroundColor = "#000000";
     };
 
     recognition.start();
 }
 
-// Initialize the application
-document.addEventListener('DOMContentLoaded', function() {
-    // Image upload
-    document.getElementById('image-upload').addEventListener('change', handleImageUpload);
+// Hamburger menu functionality
+function setupHamburgerMenu() {
+    const hamburgerMenu = document.querySelector('.hamburger-menu');
+    const dropdownMenu = document.querySelector('.dropdown-menu');
     
-    // Textarea handling
-    const userInput = document.getElementById("user-input");
-    userInput.addEventListener("input", function() {
-        this.style.height = "auto";
-        this.style.height = (this.scrollHeight) + "px";
+    if (!hamburgerMenu || !dropdownMenu) return;
+    
+    hamburgerMenu.addEventListener('click', function(e) {
+        e.stopPropagation();
+        this.classList.toggle('active');
+        dropdownMenu.style.display = this.classList.contains('active') ? 'flex' : 'none';
     });
     
-    userInput.addEventListener("keypress", function(event) {
-        if (event.key === "Enter" && !event.shiftKey) {
-            event.preventDefault();
-            toggleSendStop();
+    // Close menu when clicking outside
+    document.addEventListener('click', function(e) {
+        if (!hamburgerMenu.contains(e.target) && !dropdownMenu.contains(e.target)) {
+            hamburgerMenu.classList.remove('active');
+            dropdownMenu.style.display = 'none';
         }
     });
     
-    // Scroll handling
-    document.getElementById("chat-messages").addEventListener("scroll", toggleScrollButton);
+    // Prevent menu from closing when clicking inside it
+    dropdownMenu.addEventListener('click', function(e) {
+        e.stopPropagation();
+    });
+}
+
+// Initialize the application
+document.addEventListener('DOMContentLoaded', function() {
+    // Image upload
+    const imageUpload = document.getElementById('image-upload');
+    if (imageUpload) {
+        imageUpload.addEventListener('change', handleImageUpload);
+    }
     
-    // Hamburger menu
-    const hamburgerMenu = document.querySelector('.hamburger-menu');
-    if (hamburgerMenu) {
-        hamburgerMenu.addEventListener('click', function() {
-            this.classList.toggle('active');
+    // Textarea handling
+    const userInput = document.getElementById("user-input");
+    if (userInput) {
+        userInput.addEventListener("input", function() {
+            this.style.height = "auto";
+            this.style.height = (this.scrollHeight) + "px";
         });
         
-        document.addEventListener('click', function(event) {
-            if (!hamburgerMenu.contains(event.target)) {
-                hamburgerMenu.classList.remove('active');
+        userInput.addEventListener("keypress", function(event) {
+            if (event.key === "Enter" && !event.shiftKey) {
+                event.preventDefault();
+                toggleSendStop();
             }
         });
     }
     
+    // Scroll handling
+    const chatMessages = document.getElementById("chat-messages");
+    if (chatMessages) {
+        chatMessages.addEventListener("scroll", toggleScrollButton);
+    }
+    
+    // New chat button
+    const newChatBtn = document.getElementById('new-chat-btn');
+    if (newChatBtn) {
+        newChatBtn.addEventListener('click', function() {
+            fetch('/new_chat')
+                .then(response => response.json())
+                .then(data => {
+                    if (data.status === 'success') {
+                        const chatMessages = document.getElementById('chat-messages');
+                        if (chatMessages) chatMessages.innerHTML = '';
+                        clearImagePreviews();
+                    }
+                });
+        });
+    }
+    
+    // Setup hamburger menu
+    setupHamburgerMenu();
+    
     // Initialize UI
     toggleScrollButton();
+    addCopyButtonFunctionality();
 });
