@@ -1,286 +1,293 @@
 from flask import Flask, render_template, request, jsonify, Response, session
+from flask.sessions import SecureCookieSessionInterface
+from itsdangerous import URLSafeTimedSerializer
 from openai import OpenAI
 import os
 import logging
 import secrets
 from dotenv import load_dotenv
-from langdetect import detect, DetectorFactory, LangDetectException
-from datetime import timedelta
+from datetime import timedelta, datetime
 import base64
 import re
+import time
+from threading import Thread
+from langdetect import detect, DetectorFactory, LangDetectException
 
-# Load environment variables from .env file
+# Load environment variables
 load_dotenv()
 
 # Set up logging
-logging.basicConfig(level=logging.DEBUG)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler('app.log')
+    ]
+)
 logger = logging.getLogger(__name__)
 
 # Ensure consistent language detection
 DetectorFactory.seed = 0
 
+class CustomSessionInterface(SecureCookieSessionInterface):
+    """Custom session interface to optimize cookie size"""
+    def get_signing_serializer(self, app):
+        if not app.secret_key:
+            return None
+        return URLSafeTimedSerializer(
+            app.secret_key,
+            salt=self.salt,
+            serializer=self.serializer
+        )
+
 def create_app():
     app = Flask(__name__, template_folder="templates")
     
-    # Set the secret key (generate one if not provided in environment variables)
-    app.config['SECRET_KEY'] = os.getenv("FLASK_SECRET_KEY", secrets.token_hex(16))
-    # Set session lifetime
-    app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=1)
-    logger.debug(f"Secret Key: {app.config['SECRET_KEY']}")
+    # Configuration
+    app.config.update(
+        SECRET_KEY=os.getenv("FLASK_SECRET_KEY", secrets.token_hex(32)),
+        PERMANENT_SESSION_LIFETIME=timedelta(hours=6),
+        SESSION_COOKIE_HTTPONLY=True,
+        SESSION_COOKIE_SECURE=True,
+        SESSION_COOKIE_SAMESITE='Lax',
+        MAX_CONTENT_LENGTH=8 * 1024 * 1024,
+        MAX_IMAGE_SIZE=4 * 1024 * 1024,
+        SESSION_REFRESH_EACH_REQUEST=False
+    )
 
-    logger.debug(f"Template folder path: {app.template_folder}")
+    app.session_interface = CustomSessionInterface()
 
-    # Initialize the OpenAI client using the API key from environment variables
+    # Initialize OpenAI client
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
         raise ValueError("OPENAI_API_KEY environment variable is not set.")
-    client = OpenAI(api_key=api_key)
+    
+    client = OpenAI(
+        api_key=api_key,
+        timeout=30.0,
+        max_retries=2
+    )
 
-    # Debug: Print the API key to verify it's loaded correctly
-    print("API Key loaded successfully.")
-
-    # Store conversation history in a dictionary (keyed by session ID)
+    # In-memory storage
     conversation_histories = {}
+    uploaded_images_cache = {}
 
-    # Function to truncate conversation history (based on message count)
-    def truncate_conversation(conversation_history, max_messages=100):
-        while len(conversation_history) > max_messages:
-            conversation_history.pop(1)  # Remove the oldest user-assistant pair (keep system message)
-        return conversation_history
+    # Session cleanup thread
+    def cleanup_sessions():
+        while True:
+            try:
+                now = datetime.now()
+                expired_sessions = [
+                    sid for sid, data in conversation_histories.items()
+                    if now - data['last_activity'] > timedelta(hours=6)
+                ]
+                for sid in expired_sessions:
+                    del conversation_histories[sid]
+                
+                expired_images = [
+                    img_id for img_id, img_data in uploaded_images_cache.items()
+                    if now - img_data['upload_time'] > timedelta(hours=6)
+                ]
+                for img_id in expired_images:
+                    del uploaded_images_cache[img_id]
+                
+                time.sleep(3600)
+            except Exception as e:
+                logger.error(f"Cleanup error: {e}")
 
-    # Function to format response text with proper spacing
+    Thread(target=cleanup_sessions, daemon=True).start()
+
     def format_response_text(text):
+        """Format response text for better readability"""
         if not text:
             return ""
-            
-        # Add spaces between words that are stuck together
         text = re.sub(r'([a-z])([A-Z])', r'\1 \2', text)
-        # Add space after punctuation
         text = re.sub(r'([.,!?])([A-Za-z])', r'\1 \2', text)
-        # Fix common instances of stuck-together words
-        text = re.sub(r'(?<=[a-z])(?=[A-Z])', ' ', text)  # Additional fix for camelCase
-        # Fix "AsanAI" type patterns - look for sequences like 'As', 'an', 'AI', etc.
         text = re.sub(r'\b([A-Z][a-z]+)([A-Z][a-z]+)', r'\1 \2', text)
-        # Fix "Iamnotableto" type patterns
         text = re.sub(r'\b(I)(am|can|will|have|do|would)', r'\1 \2', text)
-        # Fix instances where multiple words are completely stuck together
-        text = re.sub(r'([a-z])([A-Z])', r'\1 \2', text)
-        # This regex splits words that have no spaces after punctuation
-        text = re.sub(r'([.,!?:;])([A-Za-z])', r'\1 \2', text)
-        # Remove extra spaces
-        text = ' '.join(text.split())
-        return text
+        return ' '.join(text.split()).strip()
 
-    # Routes
-    @app.route("/")
-    def home():
-        # Generate a new session ID if one doesn't exist
+    @app.before_request
+    def before_request():
+        """Initialize session with minimal data"""
         if 'session_id' not in session:
             session['session_id'] = secrets.token_hex(16)
-            session.permanent = True
-            logger.debug(f"Created new session ID: {session['session_id']}")
-        
-        logger.debug("Rendering home page...")
+            session['init_time'] = datetime.now().isoformat()
+
+    @app.after_request
+    def after_request(response):
+        """Prevent unnecessary session modifications"""
+        session.modified = False
+        return response
+
+    @app.route("/")
+    def home():
+        """Render main page"""
         return render_template("index.html")
-
-    @app.route("/about")
-    def about():
-        logger.debug("Rendering about page...")
-        return render_template("about.html")
-
-    @app.route("/services")
-    def services():
-        logger.debug("Rendering services page...")
-        return render_template("services.html")
-
-    @app.route("/contact")
-    def contact():
-        logger.debug("Rendering contact page...")
-        return render_template("contact.html")
 
     @app.route("/upload-image", methods=["POST"])
     def upload_image():
+        """Handle image uploads"""
         try:
             if 'session_id' not in session:
-                session['session_id'] = secrets.token_hex(16)
-                session.permanent = True
-            
-            session_id = session['session_id']
-            
-            uploaded_file = request.files.get('file')
-            if not uploaded_file:
+                return jsonify({"error": "Session not initialized"}), 400
+
+            file = request.files.get('file')
+            if not file:
                 return jsonify({"error": "No file uploaded"}), 400
-            
-            if not uploaded_file.content_type.startswith('image/'):
-                return jsonify({"error": "Only image files are allowed"}), 400
-            
-            # Store the image in memory (for demo purposes - in production you might want to save to disk)
-            image_bytes = uploaded_file.read()
-            base64_image = base64.b64encode(image_bytes).decode('utf-8')
-            
-            # Store in session
-            if 'uploaded_images' not in session:
-                session['uploaded_images'] = []
-            
-            session['uploaded_images'].append({
-                'filename': uploaded_file.filename,
-                'content_type': uploaded_file.content_type,
-                'base64': base64_image
-            })
-            
+
+            if not file.content_type.startswith('image/'):
+                return jsonify({"error": "Only image files allowed"}), 400
+
+            file_data = file.read()
+            if len(file_data) > app.config['MAX_IMAGE_SIZE']:
+                return jsonify({"error": f"Image exceeds {app.config['MAX_IMAGE_SIZE']//(1024*1024)}MB limit"}), 400
+
+            image_id = secrets.token_hex(16)
+            uploaded_images_cache[image_id] = {
+                'data': base64.b64encode(file_data).decode('utf-8'),
+                'content_type': file.content_type,
+                'upload_time': datetime.now(),
+                'used': False
+            }
+
             return jsonify({
                 "success": True,
-                "filename": uploaded_file.filename
+                "image_id": image_id,
+                "filename": file.filename
             })
-            
+
         except Exception as e:
-            logger.error(f"Error uploading image: {e}")
-            return jsonify({"error": str(e)}), 500
+            logger.error(f"Upload error: {e}")
+            return jsonify({"error": "File upload failed"}), 500
 
     @app.route("/chat", methods=["GET"])
-    def chat_stream():
-        user_input = request.args.get("message", "").strip()
-        
-        # Ensure we have a session ID
-        if 'session_id' not in session:
-            session['session_id'] = secrets.token_hex(16)
-            session.permanent = True
-            logger.debug(f"Created new session ID: {session['session_id']}")
-        
-        session_id = session['session_id']
-        logger.debug(f"Using session ID: {session_id}")
-        
-        # Handle empty messages
-        if not user_input and not ('uploaded_images' in session and session['uploaded_images']):
-            logger.debug("Empty message received with no images")
-            return jsonify({"response": "Please enter a message or upload an image."}), 400
-            
-        # Handle language detection with error handling
+    def chat():
+        """Handle chat requests with optional image processing"""
         try:
-            lang = detect(user_input) if user_input else "en"
-            logger.debug(f"Detected language: {lang}")
-        except LangDetectException as e:
-            logger.warning(f"Language detection failed: {e}, defaulting to English")
-            lang = "en"  # Default to English on detection failure
-        except Exception as e:
-            logger.warning(f"Unexpected error in language detection: {e}, defaulting to English")
-            lang = "en"
+            user_input = request.args.get("message", "").strip()
+            image_id = request.args.get("image_id", None)
             
-        logger.debug(f"Received user input: {user_input} (Language: {lang})")
+            if not user_input and not image_id:
+                return jsonify({"error": "Message or image required"}), 400
 
-        try:
-            # Initialize conversation history for the session if it doesn't exist
+            if 'session_id' not in session:
+                return jsonify({"error": "Session not initialized"}), 400
+
+            session_id = session['session_id']
+            
+            # Initialize conversation history
             if session_id not in conversation_histories:
-                conversation_histories[session_id] = [
-                    {
+                conversation_histories[session_id] = {
+                    'messages': [{
                         "role": "system", 
-                        "content": "You are a helpful AI assistant that can analyze images. You should fully describe what you see in images, provide detailed analysis, and answer questions about them. Always respond with proper spacing between words and coherent sentences. Never say you can't analyze images - you have full image analysis capabilities."
-                    }
-                ]
+                        "content": "You are a helpful AI assistant that can analyze images. Respond concisely in the user's language."
+                    }],
+                    'last_activity': datetime.now()
+                }
 
-            # Check if there are uploaded images in the session
-            has_images = 'uploaded_images' in session and session['uploaded_images']
+            messages = conversation_histories[session_id]['messages'].copy()
             
-            if has_images:
-                # Create the message with images
-                message_content = [
-                    {"type": "text", "text": user_input or "Please analyze this image"}
-                ]
-                
-                # Add all uploaded images
-                for img in session['uploaded_images']:
-                    message_content.append({
-                        "type": "image_url",
-                        "image_url": {
-                            "url": f"data:{img['content_type']};base64,{img['base64']}"
-                        }
-                    })
-                
-                # Add to conversation history as a user message with images
-                conversation_histories[session_id].append({
+            # Handle language detection
+            try:
+                lang = detect(user_input) if user_input else "en"
+            except (LangDetectException, Exception):
+                lang = "en"
+
+            # Prepare message content
+            if image_id and image_id in uploaded_images_cache:
+                image_data = uploaded_images_cache[image_id]
+                message_content = {
                     "role": "user",
-                    "content": message_content
-                })
-                
-                # Clear the uploaded images after sending
-                session.pop('uploaded_images', None)
-                
-                # Use vision model for image requests
-                response = client.chat.completions.create(
-                    model="gpt-4-vision-preview",
-                    messages=conversation_histories[session_id],
-                    max_tokens=1000
-                )
-                
-                # Get the full response and format it
-                full_response = response.choices[0].message.content
-                formatted_response = format_response_text(full_response)
-                
-                # Add assistant's response to conversation history
-                conversation_histories[session_id].append({
-                    "role": "assistant",
-                    "content": formatted_response
-                })
-                
-                return jsonify({"response": formatted_response})
+                    "content": [
+                        {"type": "text", "text": user_input or "Describe this image"},
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:{image_data['content_type']};base64,{image_data['data']}"
+                            }
+                        }
+                    ]
+                }
+                messages.append(message_content)
+                model_name = "gpt-4-turbo"
+                stream = False
             else:
-                # Regular text message
-                conversation_histories[session_id].append({"role": "user", "content": user_input})
+                messages.append({"role": "user", "content": user_input})
+                model_name = "gpt-4-turbo"
+                stream = True
 
-                # Truncate conversation history if it exceeds the message limit
-                conversation_histories[session_id] = truncate_conversation(conversation_histories[session_id], max_messages=100)
-
-                logger.debug("Sending request to GPT-4 API...")
-                
-                # Stream text response
-                response = client.chat.completions.create(
-                    model="gpt-4",
-                    messages=conversation_histories[session_id],
-                    stream=True
-                )
-
-                # Stream the response back to the client
+            # Call OpenAI API
+            if stream:
                 def generate():
                     full_response = ""
+                    response = client.chat.completions.create(
+                        model=model_name,
+                        messages=messages,
+                        max_tokens=800,
+                        stream=True
+                    )
+                    
                     for chunk in response:
                         if chunk.choices[0].delta.content:
                             chunk_content = chunk.choices[0].delta.content
                             full_response += chunk_content
-                            yield f"data: {chunk_content}\n\n".encode('utf-8')
-                    yield "data: [END]\n\n".encode('utf-8')
+                            yield f"data: {chunk_content}\n\n"
+                    yield "data: [END]\n\n"
 
-                    # Format and add assistant's response to conversation history
+                    # Update conversation history
                     formatted_response = format_response_text(full_response)
-                    conversation_histories[session_id].append({
-                        "role": "assistant", 
+                    conversation_histories[session_id]['messages'].append({
+                        "role": "assistant",
                         "content": formatted_response
                     })
+                    conversation_histories[session_id]['last_activity'] = datetime.now()
 
-                return Response(generate(), mimetype="text/event-stream; charset=utf-8")
+                return Response(generate(), mimetype="text/event-stream")
+            else:
+                response = client.chat.completions.create(
+                    model=model_name,
+                    messages=messages,
+                    max_tokens=800
+                )
+
+                full_response = response.choices[0].message.content
+                formatted_response = format_response_text(full_response)
                 
-        except Exception as e:
-            logger.error(f"Error during chat: {e}")
-            return jsonify({"response": "An error occurred while processing your request."}), 500
+                conversation_histories[session_id]['messages'].append({
+                    "role": "assistant",
+                    "content": formatted_response
+                })
+                conversation_histories[session_id]['last_activity'] = datetime.now()
 
-    # Add a route to clear the session/start a new chat
+                return jsonify({"response": formatted_response})
+
+        except Exception as e:
+            logger.error(f"Chat error: {e}")
+            return jsonify({"error": str(e)}), 500
+
     @app.route("/new_chat", methods=["GET"])
     def new_chat():
-        # Generate a new session ID
-        session_id = session['session_id'] if 'session_id' in session else None
-        if session_id in conversation_histories:
-            del conversation_histories[session_id]
-        
+        """Start a new chat session"""
+        if 'session_id' in session:
+            session_id = session['session_id']
+            if session_id in conversation_histories:
+                del conversation_histories[session_id]
         session.clear()
-        session['session_id'] = secrets.token_hex(16)
-        session.permanent = True
-        logger.debug(f"Created new session ID: {session['session_id']}")
-        return jsonify({"status": "success", "message": "New chat session created"})
+        return jsonify({"status": "success"})
 
     return app
 
-# Create the Flask app
-app = create_app()
-
 if __name__ == "__main__":
+    from waitress import serve
     app = create_app()
-    app.run(debug=False)
+    serve(
+        app,
+        host="0.0.0.0",
+        port=8080,
+        threads=4,
+        connection_limit=500,
+        channel_timeout=60,
+        cleanup_interval=30
+    )
