@@ -48,25 +48,27 @@ def create_app():
     logger.info("Initializing Flask application")
     app = Flask(__name__, template_folder="templates")
     
-    # Enable CORS with more flexible settings
+    # Enhanced CORS settings for mobile
     CORS(app, resources={
         r"/*": {
             "origins": "*",
-            "methods": ["GET", "POST", "OPTIONS"],
-            "allow_headers": ["Content-Type", "Authorization"]
+            "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+            "allow_headers": ["*"],
+            "expose_headers": ["*"],
+            "supports_credentials": True
         }
     })
     
     # Configuration
     app.config.update(
         SECRET_KEY=os.getenv("FLASK_SECRET_KEY", secrets.token_hex(32)),
-        PERMANENT_SESSION_LIFETIME=timedelta(hours=6),
-        SESSION_COOKIE_HTTPONLY=True,
-        SESSION_COOKIE_SECURE=False,  # Changed for mobile compatibility
-        SESSION_COOKIE_SAMESITE='Lax',
+        PERMANENT_SESSION_LIFETIME=timedelta(days=1),
+        SESSION_COOKIE_HTTPONLY=False,
+        SESSION_COOKIE_SECURE=False,
+        SESSION_COOKIE_SAMESITE='None',
         MAX_CONTENT_LENGTH=8 * 1024 * 1024,
         MAX_IMAGE_SIZE=4 * 1024 * 1024,
-        SESSION_REFRESH_EACH_REQUEST=False
+        SESSION_REFRESH_EACH_REQUEST=True
     )
 
     app.session_interface = CustomSessionInterface()
@@ -145,11 +147,15 @@ def create_app():
     def before_request():
         """Initialize session with minimal data"""
         logger.debug(f"Before request: {request.path}")
-        if 'session_id' not in session:
-            session_id = secrets.token_hex(16)
-            session['session_id'] = session_id
-            session['init_time'] = datetime.now().isoformat()
-            logger.info(f"New session initialized: {session_id}")
+        if request.endpoint != 'static':
+            session.permanent = True
+            app.permanent_session_lifetime = timedelta(days=1)
+            
+            if 'session_id' not in session:
+                session_id = secrets.token_hex(16)
+                session['session_id'] = session_id
+                session['init_time'] = datetime.now().isoformat()
+                logger.info(f"New session initialized: {session_id}")
 
     @app.after_request
     def after_request(response):
@@ -158,6 +164,7 @@ def create_app():
         response.headers.add('Cache-Control', 'no-cache, no-store, must-revalidate')
         response.headers.add('Pragma', 'no-cache')
         response.headers.add('Expires', '0')
+        response.headers.add('Access-Control-Allow-Credentials', 'true')
         session.modified = False
         logger.debug(f"After request - status: {response.status_code}")
         return response
@@ -185,14 +192,16 @@ def create_app():
 
             logger.debug(f"Received file: {file.filename}, type: {file.content_type}")
             
-            # Supported image types including mobile formats
+            # Enhanced mobile image support
             allowed_mime_types = [
                 'image/jpeg', 'image/png', 'image/gif',
-                'image/webp', 'image/heic', 'image/heif'
+                'image/webp', 'image/heic', 'image/heif',
+                'application/octet-stream'
             ]
             
-            if file.content_type.lower() not in allowed_mime_types:
-                logger.warning(f"Invalid file type: {file.content_type}")
+            content_type = file.content_type.lower()
+            if not any(content_type.startswith(t) for t in allowed_mime_types):
+                logger.warning(f"Invalid file type: {content_type}")
                 return jsonify({"error": "Only image files allowed (JPEG, PNG, GIF, WEBP, HEIC)"}), 400
 
             file_data = file.read()
@@ -203,7 +212,7 @@ def create_app():
             image_id = secrets.token_hex(16)
             uploaded_images_cache[image_id] = {
                 'data': base64.b64encode(file_data).decode('utf-8'),
-                'content_type': file.content_type,
+                'content_type': content_type,
                 'upload_time': datetime.now(),
                 'used': False
             }
@@ -219,17 +228,22 @@ def create_app():
             logger.error(f"Upload error: {e}", exc_info=True)
             return jsonify({"error": "File upload failed"}), 500
 
-    @app.route("/chat", methods=["GET"])
+    @app.route("/chat", methods=["GET", "OPTIONS"])
     def chat():
         """Handle chat requests with mobile optimization"""
+        if request.method == "OPTIONS":
+            response = jsonify({"status": "ok"})
+            response.headers.add("Access-Control-Allow-Methods", "GET, OPTIONS")
+            return response
+            
         try:
             user_input = request.args.get("message", "").strip()
             image_id = request.args.get("image_id", None)
             logger.info(f"Chat request - message: '{user_input}', image_id: {image_id}")
             
-            # Check for mobile user agent
+            # Enhanced mobile detection
             user_agent = request.headers.get('User-Agent', '').lower()
-            is_mobile = any(x in user_agent for x in ['mobile', 'android', 'iphone'])
+            is_mobile = any(x in user_agent for x in ['mobile', 'android', 'iphone', 'ipad', 'windows phone'])
             
             if not user_input and not image_id:
                 logger.warning("Empty chat request - no message or image")
@@ -289,14 +303,14 @@ def create_app():
                 }
                 messages.append(message_content)
                 model_name = "gpt-4-turbo"
-                stream = False
+                stream = False if is_mobile else True  # Disable streaming for mobile by default
                 logger.debug("Using GPT-4 with image (non-streaming)")
             else:
                 logger.debug("Processing text-only message")
                 messages.append({"role": "user", "content": user_input})
                 model_name = "gpt-4-turbo"
-                stream = True
-                logger.debug("Using GPT-4 (streaming)")
+                stream = not is_mobile  # Prefer non-streaming for mobile
+                logger.debug("Using GPT-4 (streaming: {})".format(stream))
 
             # For mobile devices, limit message history
             if is_mobile:
@@ -319,6 +333,7 @@ def create_app():
                             if chunk.choices[0].delta.content:
                                 chunk_content = chunk.choices[0].delta.content
                                 full_response += chunk_content
+                                time.sleep(0.05)  # Throttle for mobile
                                 yield f"data: {chunk_content}\n\n"
                         yield "data: [END]\n\n"
 
@@ -365,6 +380,66 @@ def create_app():
             logger.error(f"Chat processing error: {e}", exc_info=True)
             return jsonify({"error": str(e)}), 500
 
+    # Alternative endpoint for mobile devices
+    @app.route("/chat-sync", methods=["POST"])
+    def chat_sync():
+        """Synchronous chat endpoint for mobile devices"""
+        try:
+            data = request.get_json()
+            user_input = data.get("message", "").strip()
+            image_id = data.get("image_id", None)
+            
+            if 'session_id' not in session:
+                return jsonify({"error": "Session not initialized"}), 400
+                
+            session_id = session['session_id']
+            
+            # Rest of the chat logic (similar to /chat but without streaming)
+            if session_id not in conversation_histories:
+                conversation_histories[session_id] = {
+                    'messages': [{
+                        "role": "system", 
+                        "content": "You are a helpful AI assistant."
+                    }],
+                    'last_activity': datetime.now()
+                }
+
+            messages = conversation_histories[session_id]['messages'].copy()
+            
+            if image_id and image_id in uploaded_images_cache:
+                image_data = uploaded_images_cache[image_id]
+                messages.append({
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": user_input or "Describe this image"},
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:{image_data['content_type']};base64,{image_data['data']}"
+                            }
+                        }
+                    ]
+                })
+            else:
+                messages.append({"role": "user", "content": user_input})
+
+            response = client.chat.completions.create(
+                model="gpt-4-turbo",
+                messages=messages,
+                max_tokens=800
+            )
+            
+            full_response = response.choices[0].message.content
+            conversation_histories[session_id]['messages'].append({
+                "role": "assistant",
+                "content": full_response
+            })
+            
+            return jsonify({"response": full_response})
+            
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+
     @app.route("/new_chat", methods=["GET"])
     def new_chat():
         """Start a new chat session"""
@@ -378,7 +453,15 @@ def create_app():
         logger.info("Session cleared")
         return jsonify({"status": "success"})
 
-    # Mobile-friendly error handler
+    @app.route("/health")
+    def health_check():
+        """Health check endpoint"""
+        return jsonify({
+            "status": "healthy",
+            "timestamp": datetime.now().isoformat()
+        })
+
+    # Error handlers
     @app.errorhandler(404)
     def not_found(error):
         return jsonify({
