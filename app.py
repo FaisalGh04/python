@@ -1,4 +1,5 @@
 from flask import Flask, render_template, request, jsonify, Response, session
+from flask_cors import CORS
 from flask.sessions import SecureCookieSessionInterface
 from itsdangerous import URLSafeTimedSerializer
 from openai import OpenAI
@@ -47,12 +48,21 @@ def create_app():
     logger.info("Initializing Flask application")
     app = Flask(__name__, template_folder="templates")
     
+    # Enable CORS with more flexible settings
+    CORS(app, resources={
+        r"/*": {
+            "origins": "*",
+            "methods": ["GET", "POST", "OPTIONS"],
+            "allow_headers": ["Content-Type", "Authorization"]
+        }
+    })
+    
     # Configuration
     app.config.update(
         SECRET_KEY=os.getenv("FLASK_SECRET_KEY", secrets.token_hex(32)),
         PERMANENT_SESSION_LIFETIME=timedelta(hours=6),
         SESSION_COOKIE_HTTPONLY=True,
-        SESSION_COOKIE_SECURE=True,
+        SESSION_COOKIE_SECURE=False,  # Changed for mobile compatibility
         SESSION_COOKIE_SAMESITE='Lax',
         MAX_CONTENT_LENGTH=8 * 1024 * 1024,
         MAX_IMAGE_SIZE=4 * 1024 * 1024,
@@ -143,7 +153,11 @@ def create_app():
 
     @app.after_request
     def after_request(response):
-        """Prevent unnecessary session modifications"""
+        """Add headers for mobile support"""
+        response.headers.add('Accept-Encoding', 'gzip')
+        response.headers.add('Cache-Control', 'no-cache, no-store, must-revalidate')
+        response.headers.add('Pragma', 'no-cache')
+        response.headers.add('Expires', '0')
         session.modified = False
         logger.debug(f"After request - status: {response.status_code}")
         return response
@@ -156,7 +170,7 @@ def create_app():
 
     @app.route("/upload-image", methods=["POST"])
     def upload_image():
-        """Handle image uploads"""
+        """Handle image uploads with mobile support"""
         try:
             logger.info("Image upload request received")
             
@@ -171,9 +185,15 @@ def create_app():
 
             logger.debug(f"Received file: {file.filename}, type: {file.content_type}")
             
-            if not file.content_type.startswith('image/'):
+            # Supported image types including mobile formats
+            allowed_mime_types = [
+                'image/jpeg', 'image/png', 'image/gif',
+                'image/webp', 'image/heic', 'image/heif'
+            ]
+            
+            if file.content_type.lower() not in allowed_mime_types:
                 logger.warning(f"Invalid file type: {file.content_type}")
-                return jsonify({"error": "Only image files allowed"}), 400
+                return jsonify({"error": "Only image files allowed (JPEG, PNG, GIF, WEBP, HEIC)"}), 400
 
             file_data = file.read()
             if len(file_data) > app.config['MAX_IMAGE_SIZE']:
@@ -201,11 +221,15 @@ def create_app():
 
     @app.route("/chat", methods=["GET"])
     def chat():
-        """Handle chat requests with optional image processing"""
+        """Handle chat requests with mobile optimization"""
         try:
             user_input = request.args.get("message", "").strip()
             image_id = request.args.get("image_id", None)
             logger.info(f"Chat request - message: '{user_input}', image_id: {image_id}")
+            
+            # Check for mobile user agent
+            user_agent = request.headers.get('User-Agent', '').lower()
+            is_mobile = any(x in user_agent for x in ['mobile', 'android', 'iphone'])
             
             if not user_input and not image_id:
                 logger.warning("Empty chat request - no message or image")
@@ -274,6 +298,10 @@ def create_app():
                 stream = True
                 logger.debug("Using GPT-4 (streaming)")
 
+            # For mobile devices, limit message history
+            if is_mobile:
+                messages = messages[-4:]  # Keep only last 4 messages
+
             # Call OpenAI API
             logger.debug(f"Sending request to {model_name} with {len(messages)} messages")
             if stream:
@@ -291,7 +319,6 @@ def create_app():
                             if chunk.choices[0].delta.content:
                                 chunk_content = chunk.choices[0].delta.content
                                 full_response += chunk_content
-                                logger.debug(f"Streaming chunk: {chunk_content[:50]}...")
                                 yield f"data: {chunk_content}\n\n"
                         yield "data: [END]\n\n"
 
@@ -351,6 +378,23 @@ def create_app():
         logger.info("Session cleared")
         return jsonify({"status": "success"})
 
+    # Mobile-friendly error handler
+    @app.errorhandler(404)
+    def not_found(error):
+        return jsonify({
+            "error": "Not found",
+            "message": "The requested resource was not found",
+            "mobile_friendly": True
+        }), 404
+
+    @app.errorhandler(500)
+    def internal_error(error):
+        return jsonify({
+            "error": "Server error",
+            "message": "An internal server error occurred",
+            "mobile_friendly": True
+        }), 500
+
     return app
 
 app = create_app()
@@ -358,4 +402,4 @@ app = create_app()
 if __name__ == "__main__":
     logger.info("Starting application in main mode")
     app = create_app()
-    app.run(debug=False)
+    app.run(host='0.0.0.0', port=5000, debug=False)
